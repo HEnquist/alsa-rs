@@ -14,6 +14,9 @@ use alsa::pcm::{PCM, HwParams, Format, Access, State};
 use alsa::direct::pcm::MmapPlayback;
 //use itertools::multizip;
 //use transpose::transpose;
+use std::{thread, time};
+
+
 
 type Res<T> = Result<T, Box<dyn error::Error>>;
 
@@ -31,7 +34,7 @@ fn open_audio_dev_play(req_devname: String, req_samplerate: u32, req_bufsize: i6
         hwp.set_channels(2)?;
         hwp.set_rate(req_samplerate, ValueOr::Nearest)?;
         hwp.set_format(Format::s16())?;
-        hwp.set_access(Access::MMapInterleaved)?;
+        hwp.set_access(Access::RWInterleaved)?;
         hwp.set_buffer_size(req_bufsize)?;
         hwp.set_period_size(req_bufsize / 4, alsa::ValueOr::Nearest)?;
         pcmdev.hw_params(&hwp)?;
@@ -43,7 +46,7 @@ fn open_audio_dev_play(req_devname: String, req_samplerate: u32, req_bufsize: i6
         let swp = pcmdev.sw_params_current()?;
         let (bufsize, periodsize) = (hwp.get_buffer_size()?, hwp.get_period_size()?);
         swp.set_start_threshold(bufsize - periodsize)?;
-        swp.set_avail_min(periodsize)?;
+        //swp.set_avail_min(periodsize)?;
         pcmdev.sw_params(&swp)?;
         println!("Opened audio output {:?} with parameters: {:?}, {:?}", req_devname, hwp, swp);
         hwp.get_rate()?
@@ -63,7 +66,7 @@ fn open_audio_dev_capt(req_devname: String, req_samplerate: u32, req_bufsize: i6
         hwp.set_channels(2)?;
         hwp.set_rate(req_samplerate, ValueOr::Nearest)?;
         hwp.set_format(Format::s16())?;
-        hwp.set_access(Access::MMapInterleaved)?;
+        hwp.set_access(Access::RWInterleaved)?;
         hwp.set_buffer_size(req_bufsize)?;
         hwp.set_period_size(req_bufsize / 4, alsa::ValueOr::Nearest)?;
         pcmdev.hw_params(&hwp)?;
@@ -75,9 +78,9 @@ fn open_audio_dev_capt(req_devname: String, req_samplerate: u32, req_bufsize: i6
         let swp = pcmdev.sw_params_current()?;
         let (bufsize, periodsize) = (hwp.get_buffer_size()?, hwp.get_period_size()?);
         swp.set_start_threshold(bufsize - periodsize)?;
-        swp.set_avail_min(periodsize)?;
+        //swp.set_avail_min(periodsize)?;
         pcmdev.sw_params(&swp)?;
-        println!("Opened audio output {:?} with parameters: {:?}, {:?}", req_devname, hwp, swp);
+        println!("Opened audio input {:?} with parameters: {:?}, {:?}", req_devname, hwp, swp);
         hwp.get_rate()?
     };
 
@@ -131,54 +134,83 @@ impl IntoIterator for AudioChunk {
     }
 }
 
-fn write_samples(pcmdev: &alsa::PCM, mmap: &mut MmapPlayback<SF>, chunk: AudioChunk) -> Res<bool> {
 
-    //let mut chunk_iter = chunk.waveforms.iter().flat_map(|w| w.samples.iter().map(|s| *s));
-    // Treat our 6-element array as a 2D 3x2 array, and transpose it to a 2x3 array
-    //let mut output_array = vec![0; 6];
-    //transpose::transpose(&input_array, &mut output_array, 3, 2);
-    //let mut chunk_iter = chunk.waveforms.transpose().
-    if mmap.avail() > 0 {
-        // Write samples to DMA area from iterator
-        mmap.write(&mut chunk.into_iter());
-    }
-    match mmap.status().state() {
-        State::Running => { return Ok(false); }, // All fine
-        State::Prepared => { println!("Starting audio output stream"); pcmdev.start()? },
-        State::XRun => { println!("Underrun in audio output stream!"); pcmdev.prepare()? },
-        State::Suspended => { println!("Resuming audio output stream"); pcmdev.resume()? },
-        n @ _ => Err(format!("Unexpected pcm state {:?}", n))?,
-    }
-    Ok(true) // Call us again, please, there might be more data to write
+fn write_chunk(pcmdev: &alsa::PCM, io: &mut alsa::pcm::IO<SF>, chunk: AudioChunk) -> Res<usize> {
+    let buf = chunk.into_iter().collect::<Vec<SF>>();
+    let frames = io.writei(&buf[..])?;
+    Ok(frames)
+}
+
+fn read_chunk(pcmdev: &alsa::PCM, io: &mut alsa::pcm::IO<SF>) -> Res<usize> {
+    //let buf = chunk.into_iter().collect::<Vec<SF>>();
+    let mut buf = vec![0i16; 2*1024];
+    let frames = io.readi(&mut buf)?;
+    Ok(frames)
 }
 
 
-
-
 fn run() -> Res<()> {
-    let (playback_dev, pr_rate) = open_audio_dev_play("hw:PCH".to_string(), 44100, 256)?;
-    let (capture_dev, cap_rate) = open_audio_dev_capt("hw:PCH".to_string(), 44100, 256)?;
-    // Let's use the fancy new "direct mode" for minimum overhead!
-    let mut mmap = playback_dev.direct_mmap_playback::<SF>()?;
+    let (playback_dev, play_rate) = open_audio_dev_play("hw:PCH".to_string(), 44100, 1024)?;
+    let (capture_dev, capt_rate) = open_audio_dev_capt("hw:PCH".to_string(), 44100, 1024)?;
+
+    
+    
+    //let mut mmap = playback_dev.direct_mmap_playback::<SF>()?;
+
+    thread::spawn(move || {
+        let mut io_play = playback_dev.io_i16().unwrap();
+        for m in 0..10*44100/1024 {
+            let mut buf = vec![0i16; 1024];
+            for (i, a) in buf.iter_mut().enumerate() {
+                *a = ((i as f32 * 2.0 * ::std::f32::consts::PI / 128.0).sin() * 8192.0) as i16
+            }
+            let chunk = AudioChunk{
+                waveforms: vec![buf.clone(),
+                                buf],
+            };
+
+            //}
+            //loop {
+            //let frames_capt = 0;
+            let playback_state = playback_dev.state();
+            println!("playback state {:?}", playback_state);
+            if playback_state == State::XRun {
+                println!("Prepare playback");
+                playback_dev.prepare().unwrap();
+            }
+            let frames = write_chunk(&playback_dev, &mut io_play, chunk).unwrap();
+
+            println!("Chunk {}, wrote {} frames", m, frames);
+        }
+    });
+
+    thread::spawn(move || {
+        let mut io_capt = capture_dev.io_i16().unwrap();
+        for m in 0..10*44100/1024 {
+            let capture_state = capture_dev.state();
+            println!("capture state {:?}", capture_state);
+            if capture_state == State::XRun {
+                println!("Prepare capture");
+                capture_dev.prepare().unwrap();
+            }
+            let frames_capt = read_chunk(&capture_dev, &mut io_capt).unwrap();
+
+            //println!("state {:?}", playback_dev.state());
+            //if playback_dev.state() != State::Running { 
+            //    playback_dev.start()?;
+            //    println!("started");
+
+            //}
+            //}
+            println!("Chunk {}, read {} frames", m, frames_capt);
+        }
+    });
+
+    let delay = time::Duration::from_millis(100);
+    
 
     loop {
-        //let wf_r = Waveform {
-        //    len: 8,
-        //    samples: vec![-100, -100, -100, -100, 100, 100, 100, 100],
-        //};
-        //let wf_l = Waveform {
-        //    len: 8,
-        //    samples: vec![-100, -100, -100, -100, 100, 100, 100, 100],
-        //};
-        let chunk = AudioChunk{
-            waveforms: vec![vec![-100, -100, -100, -100, 0, 0, 0, 0, 100, 100, 100, 100, 0, 0, 0, 0],
-                            vec![-100, -100, -100, -100, 0, 0, 0, 0, 100, 100, 100, 100, 0, 0, 0, 0]],
-        };
-
-        //}
-        //loop {
-        write_samples(&playback_dev, &mut mmap, chunk)?;
-        //}
+        thread::sleep(delay);
     }
     Ok(())
 }
