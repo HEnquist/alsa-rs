@@ -96,6 +96,8 @@ type SF = i16;
 //}
 
 struct AudioChunk {
+    frames: usize,
+    channels: usize,
     waveforms: Vec<Vec<SF>>, //Waveform>,
 }
 
@@ -134,9 +136,52 @@ impl IntoIterator for AudioChunk {
     }
 }
 
+impl AudioChunk {
+    fn to_interleaved(self) -> Vec<SF> {
+        //let buf = chunk.into_iter().collect::<Vec<SF>>();
+        //buf
+        let num_samples = self.channels*self.frames;
+        let mut buf = Vec::with_capacity(num_samples);
+
+        for frame in 0..self.frames {
+            for chan in 0..self.channels {
+                buf.push(self.waveforms[chan][frame]);
+            }
+
+        }
+        buf
+    }
+
+        fn from_interleaved(buffer: Vec<SF>, num_channels: usize) -> AudioChunk {
+        //let buf = chunk.into_iter().collect::<Vec<SF>>();
+        //buf
+        let num_samples = buffer.len();
+        let num_frames = num_samples/num_channels;
+        
+        let mut waveforms = Vec::with_capacity(num_channels);
+        for chan in 0..num_channels {
+            waveforms.push(Vec::with_capacity(num_frames));
+        }
+        
+        let mut samples = buffer.iter();
+        for frame in 0..num_frames {
+            for chan in 0..num_channels {
+                waveforms[chan].push(*samples.next().unwrap());
+            }
+
+        }
+        AudioChunk {
+            channels: num_channels,
+            frames: num_frames,
+            waveforms: waveforms,
+        }
+    }
+}
+
 
 fn write_chunk(pcmdev: &alsa::PCM, io: &mut alsa::pcm::IO<SF>, chunk: AudioChunk) -> Res<usize> {
-    let buf = chunk.into_iter().collect::<Vec<SF>>();
+    //let buf = chunk.into_iter().collect::<Vec<SF>>();
+    let buf = chunk.to_interleaved();
     let frames = io.writei(&buf[..])?;
     Ok(frames)
 }
@@ -159,12 +204,14 @@ fn run() -> Res<()> {
 
     thread::spawn(move || {
         let mut io_play = playback_dev.io_i16().unwrap();
-        for m in 0..10*44100/1024 {
+        for m in 0..2*44100/1024 {
             let mut buf = vec![0i16; 1024];
             for (i, a) in buf.iter_mut().enumerate() {
                 *a = ((i as f32 * 2.0 * ::std::f32::consts::PI / 128.0).sin() * 8192.0) as i16
             }
             let chunk = AudioChunk{
+                frames: 1024,
+                channels: 2,
                 waveforms: vec![buf.clone(),
                                 buf],
             };
@@ -186,7 +233,7 @@ fn run() -> Res<()> {
 
     thread::spawn(move || {
         let mut io_capt = capture_dev.io_i16().unwrap();
-        for m in 0..10*44100/1024 {
+        for m in 0..2*44100/1024 {
             let capture_state = capture_dev.state();
             println!("capture state {:?}", capture_state);
             if capture_state == State::XRun {
