@@ -1,27 +1,12 @@
-// A quickly made Hammond organ.
-
 extern crate alsa;
-//extern crate itertools;
-//extern crate transpose;
-//extern crate sample;
-
 use std::{iter, error};
-//use alsa::pcm;
-//use std::ffi::CString;
-//use sample::signal;
 use alsa::{Direction, ValueOr};
 use alsa::pcm::{PCM, HwParams, Format, Access, State};
 use alsa::direct::pcm::MmapPlayback;
-//use itertools::multizip;
-//use transpose::transpose;
 use std::{thread, time};
-
-
+use std::sync::mpsc;
 
 type Res<T> = Result<T, Box<dyn error::Error>>;
-
-
-
 
 fn open_audio_dev_play(req_devname: String, req_samplerate: u32, req_bufsize: i64) -> Res<(alsa::PCM, u32)> {
 
@@ -90,10 +75,6 @@ fn open_audio_dev_capt(req_devname: String, req_samplerate: u32, req_bufsize: i6
 // Sample format
 type SF = i16;
 
-//struct Waveform {
-//    len: usize,
-//    samples: Vec<SF>,
-//}
 
 struct AudioChunk {
     frames: usize,
@@ -101,40 +82,6 @@ struct AudioChunk {
     waveforms: Vec<Vec<SF>>, //Waveform>,
 }
 
-struct AudioChunkInterleaved {
-    chunk: AudioChunk,
-    index_time: usize,
-    index_chan: usize,
-}
-
-impl Iterator for AudioChunkInterleaved {
-    type Item = SF;
-    fn next(&mut self) -> Option<SF> {
-        if self.index_time>=self.chunk.waveforms[0].len() {
-            return None
-        }
-        let result = self.chunk.waveforms[self.index_chan][self.index_time];
-        self.index_chan += 1;
-        if self.index_chan>=self.chunk.waveforms.len() {
-            self.index_chan = 0;
-            self.index_time += 1;
-        }
-        Some(result)
-    }
-}
-
-impl IntoIterator for AudioChunk {
-    type Item = SF;
-    type IntoIter = AudioChunkInterleaved;
-
-    fn into_iter(self) -> Self::IntoIter {
-        AudioChunkInterleaved {
-            chunk: self,
-            index_time: 0,
-            index_chan: 0,
-        }
-    }
-}
 
 impl AudioChunk {
     fn to_interleaved(self) -> Vec<SF> {
@@ -178,78 +125,97 @@ impl AudioChunk {
     }
 }
 
+enum Message {
+    Quit,
+    Audio(AudioChunk),
+}
 
-fn write_chunk(pcmdev: &alsa::PCM, io: &mut alsa::pcm::IO<SF>, chunk: AudioChunk) -> Res<usize> {
+fn play_from_buffer(pcmdev: &alsa::PCM, io: &mut alsa::pcm::IO<SF>, buf: Vec<SF>) -> Res<usize> {
     //let buf = chunk.into_iter().collect::<Vec<SF>>();
-    let buf = chunk.to_interleaved();
+    //let buf = chunk.to_interleaved();
+    let playback_state = pcmdev.state();
+    //println!("playback state {:?}", playback_state);
+    if playback_state == State::XRun {
+        println!("Prepare playback");
+        pcmdev.prepare().unwrap();
+    }
     let frames = io.writei(&buf[..])?;
     Ok(frames)
 }
 
-fn read_chunk(pcmdev: &alsa::PCM, io: &mut alsa::pcm::IO<SF>) -> Res<usize> {
+fn capture_to_buffer(pcmdev: &alsa::PCM, io: &mut alsa::pcm::IO<SF>, channels: usize, frames: usize) -> Res<Vec<SF>> {
     //let buf = chunk.into_iter().collect::<Vec<SF>>();
-    let mut buf = vec![0i16; 2*1024];
+    let mut buf: Vec<SF>;
+    buf = vec![0; channels*frames];
+    let capture_state = pcmdev.state();
+    if capture_state == State::XRun {
+        pcmdev.prepare().unwrap();
+    }
     let frames = io.readi(&mut buf)?;
-    Ok(frames)
+    //let chunk = AudioChunk::from_interleaved(buf, 2);
+    Ok(buf)
 }
-
 
 fn run() -> Res<()> {
     let (playback_dev, play_rate) = open_audio_dev_play("hw:PCH".to_string(), 44100, 1024)?;
     let (capture_dev, capt_rate) = open_audio_dev_capt("hw:PCH".to_string(), 44100, 1024)?;
 
     
-    
+    let (tx_pb, rx_pb) = mpsc::channel();
+    let (tx_cap, rx_cap) = mpsc::channel();
+
     //let mut mmap = playback_dev.direct_mmap_playback::<SF>()?;
 
     thread::spawn(move || {
+        loop {
+            match rx_cap.recv() {
+                Ok(Message::Audio(chunk)) => {
+                    let mut buf = vec![0i16; 1024];
+                    for (i, a) in buf.iter_mut().enumerate() {
+                        *a = ((i as f32 * 2.0 * ::std::f32::consts::PI / 128.0).sin() * 8192.0) as i16
+                    }
+                    let chunk = AudioChunk{
+                        frames: 1024,
+                        channels: 2,
+                        waveforms: vec![buf.clone(),
+                                        buf],
+                    };
+                    let msg = Message::Audio(chunk);
+                    tx_pb.send(msg).unwrap();
+                }
+                _ => {}
+            }
+        }
+    });
+
+    thread::spawn(move || {
+        let delay = time::Duration::from_millis(2*1000*1024/44100);
+        thread::sleep(delay);
         let mut io_play = playback_dev.io_i16().unwrap();
-        for m in 0..2*44100/1024 {
-            let mut buf = vec![0i16; 1024];
-            for (i, a) in buf.iter_mut().enumerate() {
-                *a = ((i as f32 * 2.0 * ::std::f32::consts::PI / 128.0).sin() * 8192.0) as i16
+        let mut m = 0;
+        loop {
+            match rx_pb.recv() {
+                Ok(Message::Audio(chunk)) => {
+                    let buf = chunk.to_interleaved();
+                    let frames = play_from_buffer(&playback_dev, &mut io_play, buf);
+                    println!("PB Chunk {}, wrote {:?} frames", m, frames);
+                    m += 1;
+                }
+                _ => {}
             }
-            let chunk = AudioChunk{
-                frames: 1024,
-                channels: 2,
-                waveforms: vec![buf.clone(),
-                                buf],
-            };
-
-            //}
-            //loop {
-            //let frames_capt = 0;
-            let playback_state = playback_dev.state();
-            println!("playback state {:?}", playback_state);
-            if playback_state == State::XRun {
-                println!("Prepare playback");
-                playback_dev.prepare().unwrap();
-            }
-            let frames = write_chunk(&playback_dev, &mut io_play, chunk).unwrap();
-
-            println!("Chunk {}, wrote {} frames", m, frames);
         }
     });
 
     thread::spawn(move || {
         let mut io_capt = capture_dev.io_i16().unwrap();
-        for m in 0..2*44100/1024 {
-            let capture_state = capture_dev.state();
-            println!("capture state {:?}", capture_state);
-            if capture_state == State::XRun {
-                println!("Prepare capture");
-                capture_dev.prepare().unwrap();
-            }
-            let frames_capt = read_chunk(&capture_dev, &mut io_capt).unwrap();
-
-            //println!("state {:?}", playback_dev.state());
-            //if playback_dev.state() != State::Running { 
-            //    playback_dev.start()?;
-            //    println!("started");
-
-            //}
-            //}
-            println!("Chunk {}, read {} frames", m, frames_capt);
+        let mut m = 0;
+        loop {
+            let buf = capture_to_buffer(&capture_dev, &mut io_capt, 2, 1024).unwrap();
+            let chunk = AudioChunk::from_interleaved(buf, 2);
+            let msg = Message::Audio(chunk);
+            tx_cap.send(msg).unwrap();
+            println!("Capture chunk {}", m);
+            m += 1;
         }
     });
 
