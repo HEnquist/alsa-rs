@@ -5,7 +5,7 @@
 use libc;
 use super::error::*;
 use std::io;
-use libc::pollfd;
+pub use libc::pollfd;
 
 
 bitflags! {
@@ -34,13 +34,13 @@ pub trait Descriptors {
 
 impl Descriptors for pollfd {
     fn count(&self) -> usize { 1 }
-    fn fill(&self, a: &mut [pollfd]) -> Result<usize> { a[0] = self.clone(); Ok(1) }
+    fn fill(&self, a: &mut [pollfd]) -> Result<usize> { a[0] = *self; Ok(1) }
     fn revents(&self, a: &[pollfd]) -> Result<Flags> { Ok(Flags::from_bits_truncate(a[0].revents)) }
 }
 
 /// Wrapper around the libc poll call.
 pub fn poll(fds: &mut[pollfd], timeout: i32) -> Result<usize> {
-    let r = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::c_ulong, timeout as libc::c_int) };
+    let r = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, timeout as libc::c_int) };
     if r >= 0 { Ok(r as usize) } else {
          from_code("poll", -io::Error::last_os_error().raw_os_error().unwrap()).map(|_| unreachable!())
     }

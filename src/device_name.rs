@@ -45,7 +45,7 @@ impl HintIter {
 
 impl Iterator for HintIter {
     type Item = Hint;
-    fn next<'a> (&'a mut self) -> Option<Hint> {
+    fn next(&mut self) -> Option<Hint> {
         if self.0.is_null() { return None; }
         let p = unsafe { *self.0.offset(self.1) };
         if p.is_null() { return None; }
@@ -65,7 +65,8 @@ pub struct Hint {
 
 impl Hint {
     fn get_str(p: *const c_void, name: &str) -> Option<String> {
-        let c = unsafe { alsa::snd_device_name_get_hint(p, CString::new(name).unwrap().as_ptr()) };
+        let name = CString::new(name).unwrap();
+        let c = unsafe { alsa::snd_device_name_get_hint(p, name.as_ptr()) };
         from_alloc("snd_device_name_get_hint", c).ok()
     }
 

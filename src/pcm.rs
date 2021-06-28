@@ -22,7 +22,7 @@
 //! // Make sure we don't start the stream too early
 //! let hwp = pcm.hw_params_current().unwrap();
 //! let swp = pcm.sw_params_current().unwrap();
-//! swp.set_start_threshold(hwp.get_buffer_size().unwrap() - hwp.get_period_size().unwrap()).unwrap();
+//! swp.set_start_threshold(hwp.get_buffer_size().unwrap()).unwrap();
 //! pcm.sw_params(&swp).unwrap();
 //!
 //! // Make a sine wave
@@ -158,6 +158,9 @@ impl PCM {
     pub fn state(&self) -> State { State::from_c_int(
         unsafe { alsa::snd_pcm_state(self.0) } as c_int, "snd_pcm_state").unwrap() }
 
+    /// Only used for debugging the alsa library. Please use the "state" function instead.
+    pub fn state_raw(&self) -> c_int { unsafe { alsa::snd_pcm_state(self.0) as c_int } }
+
     pub fn bytes_to_frames(&self, i: isize) -> Frames { unsafe { alsa::snd_pcm_bytes_to_frames(self.0, i as ssize_t) }}
     pub fn frames_to_bytes(&self, i: Frames) -> isize { unsafe { alsa::snd_pcm_frames_to_bytes(self.0, i) as isize }}
 
@@ -168,10 +171,13 @@ impl PCM {
         let (mut a, mut d) = (0, 0);
         acheck!(snd_pcm_avail_delay(self.0, &mut a, &mut d)).map(|_| (a, d))
     }
+    pub fn delay(&self) -> Result<Frames> {
+        let mut d = 0;
+        acheck!(snd_pcm_delay(self.0, &mut d)).map(|_| d)
+    }
 
     pub fn status(&self) -> Result<Status> {
-        let z = Status::new();
-        acheck!(snd_pcm_status(self.0, z.ptr())).map(|_| z)
+        StatusBuilder::new().build(self)
     }
 
     fn verify_format(&self, f: Format) -> Result<()> {
@@ -183,16 +189,22 @@ impl PCM {
         }
     }
 
-    pub fn io_i8<'a>(&'a self) -> Result<IO<'a, i8>> { self.verify_format(Format::S8).map(|_| IO::new(&self)) }
-    pub fn io_u8<'a>(&'a self) -> Result<IO<'a, u8>> { self.verify_format(Format::U8).map(|_| IO::new(&self)) }
-    pub fn io_i16<'a>(&'a self) -> Result<IO<'a, i16>> { self.verify_format(Format::s16()).map(|_| IO::new(&self)) }
-    pub fn io_u16<'a>(&'a self) -> Result<IO<'a, u16>> { self.verify_format(Format::u16()).map(|_| IO::new(&self)) }
-    pub fn io_i32<'a>(&'a self) -> Result<IO<'a, i32>> { self.verify_format(Format::s32()).map(|_| IO::new(&self)) }
-    pub fn io_u32<'a>(&'a self) -> Result<IO<'a, u32>> { self.verify_format(Format::u32()).map(|_| IO::new(&self)) }
-    pub fn io_f32<'a>(&'a self) -> Result<IO<'a, f32>> { self.verify_format(Format::float()).map(|_| IO::new(&self)) }
-    pub fn io_f64<'a>(&'a self) -> Result<IO<'a, f64>> { self.verify_format(Format::float64()).map(|_| IO::new(&self)) }
+    pub fn io_i8(&self) -> Result<IO<i8>> { self.io_checked() }
+    pub fn io_u8(&self) -> Result<IO<u8>> { self.io_checked() }
+    pub fn io_i16(&self) -> Result<IO<i16>> { self.io_checked() }
+    pub fn io_u16(&self) -> Result<IO<u16>> { self.io_checked() }
+    pub fn io_i32(&self) -> Result<IO<i32>> { self.io_checked() }
+    pub fn io_u32(&self) -> Result<IO<u32>> { self.io_checked() }
+    pub fn io_f32(&self) -> Result<IO<f32>> { self.io_checked() }
+    pub fn io_f64(&self) -> Result<IO<f64>> { self.io_checked() }
 
-    pub fn io<'a>(&'a self) -> IO<'a, u8> { IO::new(&self) }
+    pub fn io_checked<S: IoFormat>(&self) -> Result<IO<S>> {
+        self.verify_format(S::FORMAT).map(|_| IO::new(self))
+    }
+
+    #[deprecated(note = "renamed to io_bytes")]
+    pub fn io(&self) -> IO<u8> { IO::new(self) }
+    pub fn io_bytes(&self) -> IO<u8> { IO::new(self) }
 
     /// Read buffers by talking to the kernel directly, bypassing alsa-lib.
     pub fn direct_mmap_capture<S>(&self) -> Result<crate::direct::pcm::MmapCapture<S>> {
@@ -214,8 +226,8 @@ impl PCM {
     }
 
     /// Retreive current PCM hardware configuration.
-    pub fn hw_params_current<'a>(&'a self) -> Result<HwParams<'a>> {
-        HwParams::new(&self).and_then(|h|
+    pub fn hw_params_current(&self) -> Result<HwParams> {
+        HwParams::new(self).and_then(|h|
             acheck!(snd_pcm_hw_params_current(self.0, h.0)).map(|_| h))
     }
 
@@ -223,8 +235,8 @@ impl PCM {
         acheck!(snd_pcm_sw_params(self.0, h.0)).map(|_| ())
     }
 
-    pub fn sw_params_current<'a>(&'a self) -> Result<SwParams<'a>> {
-        SwParams::new(&self).and_then(|h|
+    pub fn sw_params_current(&self) -> Result<SwParams> {
+        SwParams::new(self).and_then(|h|
             acheck!(snd_pcm_sw_params_current(self.0, h.0)).map(|_| h))
     }
 
@@ -264,7 +276,7 @@ impl PCM {
 
     pub fn get_chmap(&self) -> Result<Chmap> {
         let p = unsafe { alsa::snd_pcm_get_chmap(self.0) };
-        if p == ptr::null_mut() { Err(Error::unsupported("snd_pcm_get_chmap")) }
+        if p.is_null() { Err(Error::unsupported("snd_pcm_get_chmap")) }
         else { Ok(chmap::chmap_new(p)) }
     }
 
@@ -361,7 +373,7 @@ impl<'a, S: Copy> IO<'a, S> {
         }
 
         let buf = unsafe {
-            let p = ((*areas).addr as *mut S).offset(self.from_frames(offs) as isize);
+            let p = ((*areas).addr as *mut S).add(self.from_frames(offs));
             ::std::slice::from_raw_parts_mut(p, self.from_frames(f))
         };
         let fres = func(buf);
@@ -406,8 +418,9 @@ alsa_enum!(
 );
 
 alsa_enum!(
+    #[non_exhaustive]
     /// [SND_PCM_FORMAT_xxx](http://www.alsa-project.org/alsa-doc/alsa-lib/group___p_c_m.html) constants
-    Format, ALL_FORMATS[45],
+    Format, ALL_FORMATS[48],
 
     Unknown = SND_PCM_FORMAT_UNKNOWN,
     S8 = SND_PCM_FORMAT_S8,
@@ -454,39 +467,74 @@ alsa_enum!(
     G723401B = SND_PCM_FORMAT_G723_40_1B,
     DSDU8 = SND_PCM_FORMAT_DSD_U8,
     DSDU16LE = SND_PCM_FORMAT_DSD_U16_LE,
-//    DSDU32LE = SND_PCM_FORMAT_DSD_U32_LE,
-//    DSDU16BE = SND_PCM_FORMAT_DSD_U16_BE,
-//    DSDU32BE = SND_PCM_FORMAT_DSD_U32_BE,
+    DSDU32LE = SND_PCM_FORMAT_DSD_U32_LE,
+    DSDU16BE = SND_PCM_FORMAT_DSD_U16_BE,
+    DSDU32BE = SND_PCM_FORMAT_DSD_U32_BE,
 );
 
 impl Format {
-    #[cfg(target_endian = "little")] pub fn s16() -> Format { Format::S16LE }
-    #[cfg(target_endian = "big")] pub fn s16() -> Format { Format::S16BE }
+    pub const fn s16() -> Format { <i16 as IoFormat>::FORMAT }
+    pub const fn u16() -> Format { <u16 as IoFormat>::FORMAT }
+    pub const fn s32() -> Format { <i32 as IoFormat>::FORMAT }
+    pub const fn u32() -> Format { <u32 as IoFormat>::FORMAT }
+    pub const fn float() -> Format { <f32 as IoFormat>::FORMAT }
+    pub const fn float64() -> Format { <f64 as IoFormat>::FORMAT }
 
-    #[cfg(target_endian = "little")] pub fn u16() -> Format { Format::U16LE }
-    #[cfg(target_endian = "big")] pub fn u16() -> Format { Format::U16BE }
+    #[cfg(target_endian = "little")] pub const fn s24() -> Format { Format::S24LE }
+    #[cfg(target_endian = "big")] pub const fn s24() -> Format { Format::S24BE }
 
-    #[cfg(target_endian = "little")] pub fn s24() -> Format { Format::S24LE }
-    #[cfg(target_endian = "big")] pub fn s24() -> Format { Format::S24BE }
+    #[cfg(target_endian = "little")] pub const fn u24() -> Format { Format::U24LE }
+    #[cfg(target_endian = "big")] pub const fn u24() -> Format { Format::U24BE }
 
-    #[cfg(target_endian = "little")] pub fn u24() -> Format { Format::U24LE }
-    #[cfg(target_endian = "big")] pub fn u24() -> Format { Format::U24BE }
-
-    #[cfg(target_endian = "little")] pub fn s32() -> Format { Format::S32LE }
-    #[cfg(target_endian = "big")] pub fn s32() -> Format { Format::S32BE }
-
-    #[cfg(target_endian = "little")] pub fn u32() -> Format { Format::U32LE }
-    #[cfg(target_endian = "big")] pub fn u32() -> Format { Format::U32BE }
-
-    #[cfg(target_endian = "little")] pub fn float() -> Format { Format::FloatLE }
-    #[cfg(target_endian = "big")] pub fn float() -> Format { Format::FloatBE }
-
-    #[cfg(target_endian = "little")] pub fn float64() -> Format { Format::Float64LE }
-    #[cfg(target_endian = "big")] pub fn float64() -> Format { Format::Float64BE }
-
-    #[cfg(target_endian = "little")] pub fn iec958_subframe() -> Format { Format::IEC958SubframeLE }
-    #[cfg(target_endian = "big")] pub fn iec958_subframe() -> Format { Format::IEC958SubframeBE }
+    #[cfg(target_endian = "little")] pub const fn iec958_subframe() -> Format { Format::IEC958SubframeLE }
+    #[cfg(target_endian = "big")] pub const fn iec958_subframe() -> Format { Format::IEC958SubframeBE }
 }
+
+
+pub trait IoFormat: Copy {
+    const FORMAT: Format;
+}
+
+impl IoFormat for i8 { const FORMAT: Format = Format::S8; }
+impl IoFormat for u8 { const FORMAT: Format = Format::U8; }
+
+impl IoFormat for i16 {
+    #[cfg(target_endian = "little")]
+    const FORMAT: Format = Format::S16LE;
+    #[cfg(target_endian = "big")]
+    const FORMAT: Format = Format::S16BE;
+}
+impl IoFormat for u16 {
+    #[cfg(target_endian = "little")]
+    const FORMAT: Format = Format::U16LE;
+    #[cfg(target_endian = "big")]
+    const FORMAT: Format = Format::U16BE;
+}
+impl IoFormat for i32 {
+    #[cfg(target_endian = "little")]
+    const FORMAT: Format = Format::S32LE;
+    #[cfg(target_endian = "big")]
+    const FORMAT: Format = Format::S32BE;
+}
+impl IoFormat for u32 {
+    #[cfg(target_endian = "little")]
+    const FORMAT: Format = Format::U32LE;
+    #[cfg(target_endian = "big")]
+    const FORMAT: Format = Format::U32BE;
+}
+impl IoFormat for f32 {
+    #[cfg(target_endian = "little")]
+    const FORMAT: Format = Format::FloatLE;
+    #[cfg(target_endian = "big")]
+    const FORMAT: Format = Format::FloatBE;
+}
+impl IoFormat for f64 {
+    #[cfg(target_endian = "little")]
+    const FORMAT: Format = Format::Float64LE;
+    #[cfg(target_endian = "big")]
+    const FORMAT: Format = Format::Float64BE;
+}
+
 
 alsa_enum!(
     /// [SND_PCM_ACCESS_xxx](http://www.alsa-project.org/alsa-doc/alsa-lib/group___p_c_m.html) constants
@@ -497,6 +545,15 @@ alsa_enum!(
     MMapComplex = SND_PCM_ACCESS_MMAP_COMPLEX,
     RWInterleaved = SND_PCM_ACCESS_RW_INTERLEAVED,
     RWNonInterleaved = SND_PCM_ACCESS_RW_NONINTERLEAVED,
+);
+
+alsa_enum!(
+    /// [SND_PCM_TSTAMP_TYPE_xxx](http://www.alsa-project.org/alsa-doc/alsa-lib/group___p_c_m.html) constants
+    TstampType, ALL_TSTAMP_TYPES[3],
+
+    Gettimeofday = SND_PCM_TSTAMP_TYPE_GETTIMEOFDAY,
+    Monotonic = SND_PCM_TSTAMP_TYPE_MONOTONIC,
+    MonotonicRaw = SND_PCM_TSTAMP_TYPE_MONOTONIC_RAW,
 );
 
 /// [snd_pcm_hw_params_t](http://www.alsa-project.org/alsa-doc/alsa-lib/group___p_c_m___h_w___params.html) wrapper
@@ -715,6 +772,15 @@ impl<'a> HwParams<'a> {
         unsafe { alsa::snd_pcm_hw_params_can_resume(self.0) != 0 }
     }
 
+    /// Returns true if the alsa stream supports the provided `AudioTstampType`, false if not.
+    ///
+    /// This function should only be called when the configuration space contains a single
+    /// configuration. Call `PCM::hw_params` to choose a single configuration from the
+    /// configuration space.
+    pub fn supports_audio_ts_type(&self, type_: AudioTstampType) -> bool {
+        unsafe { alsa::snd_pcm_hw_params_supports_audio_ts_type(self.0, type_ as libc::c_int) != 0 }
+    }
+
     pub fn dump(&self, o: &mut Output) -> Result<()> {
         acheck!(snd_pcm_hw_params_dump(self.0, super::io::output_handle(o))).map(|_| ())
     }
@@ -728,7 +794,7 @@ impl<'a> HwParams<'a> {
 impl<'a> Clone for HwParams<'a> {
     fn clone(&self) -> HwParams<'a> {
         let mut r = HwParams::new(self.1).unwrap();
-        r.copy_from(&self);
+        r.copy_from(self);
         r
     }
 }
@@ -802,6 +868,16 @@ impl<'a> SwParams<'a> {
         acheck!(snd_pcm_sw_params_get_tstamp_mode(self.0, &mut v)).map(|_| v != 0)
     }
 
+    pub fn set_tstamp_type(&self, v: TstampType) -> Result<()> {
+        acheck!(snd_pcm_sw_params_set_tstamp_type((self.1).0, self.0, v as u32)).map(|_| ())
+    }
+
+    pub fn get_tstamp_type(&self) -> Result<TstampType> {
+        let mut v = 0;
+        acheck!(snd_pcm_sw_params_get_tstamp_type(self.0, &mut v))?;
+        TstampType::from_c_int(v as c_int, "snd_pcm_sw_params_get_tstamp_type")
+    }
+
     pub fn dump(&self, o: &mut Output) -> Result<()> {
         acheck!(snd_pcm_sw_params_dump(self.0, super::io::output_handle(o))).map(|_| ())
     }
@@ -859,6 +935,47 @@ impl Status {
     }
 }
 
+/// Builder for [`Status`].
+///
+/// Allows setting the audio timestamp configuration before retrieving the
+/// status from the stream.
+pub struct StatusBuilder(Status);
+
+impl StatusBuilder {
+    pub fn new() -> Self {
+        StatusBuilder(Status::new())
+    }
+
+    pub fn audio_htstamp_config(
+        self,
+        type_requested: AudioTstampType,
+        report_delay: bool,
+    ) -> Self {
+        let mut cfg: alsa::snd_pcm_audio_tstamp_config_t = unsafe { std::mem::zeroed() };
+        cfg.set_type_requested(type_requested as _);
+        cfg.set_report_delay(report_delay as _);
+        unsafe { alsa::snd_pcm_status_set_audio_htstamp_config(self.0.ptr(), &mut cfg) };
+        self
+    }
+
+    pub fn build(self, pcm: &PCM) -> Result<Status> {
+        acheck!(snd_pcm_status(pcm.0, self.0.ptr())).map(|_| self.0)
+    }
+}
+
+alsa_enum!(
+    #[non_exhaustive]
+    /// [SND_PCM_AUDIO_TSTAMP_TYPE_xxx](http://www.alsa-project.org/alsa-doc/alsa-lib/group___p_c_m.html) constants
+    AudioTstampType, ALL_AUDIO_TSTAMP_TYPES[6],
+
+    Compat = SND_PCM_AUDIO_TSTAMP_TYPE_COMPAT,
+    Default = SND_PCM_AUDIO_TSTAMP_TYPE_DEFAULT,
+    Link = SND_PCM_AUDIO_TSTAMP_TYPE_LINK,
+    LinkAbsolute = SND_PCM_AUDIO_TSTAMP_TYPE_LINK_ABSOLUTE,
+    LinkEstimated = SND_PCM_AUDIO_TSTAMP_TYPE_LINK_ESTIMATED,
+    LinkSynchronized = SND_PCM_AUDIO_TSTAMP_TYPE_LINK_SYNCHRONIZED,
+);
+
 #[test]
 fn info_from_default() {
     use std::ffi::CString;
@@ -909,7 +1026,7 @@ fn playback_to_default() {
 
     let hwp = pcm.hw_params_current().unwrap();
     let swp = pcm.sw_params_current().unwrap();
-    swp.set_start_threshold(hwp.get_buffer_size().unwrap() - hwp.get_period_size().unwrap()).unwrap();
+    swp.set_start_threshold(hwp.get_buffer_size().unwrap()).unwrap();
     pcm.sw_params(&swp).unwrap();
 
     println!("PCM status: {:?}, {:?}", pcm.state(), pcm.hw_params_current().unwrap());
