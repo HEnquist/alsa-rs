@@ -45,9 +45,11 @@
 
 use libc::{c_int, c_uint, c_void, ssize_t, c_short, timespec, pollfd};
 use crate::alsa;
+use std::convert::Infallible;
 use std::marker::PhantomData;
 use std::mem::size_of;
 use std::ffi::{CStr, CString};
+use std::str::FromStr;
 use std::{io, fmt, ptr, cell};
 use super::error::*;
 use super::{Direction, Output, poll, ValueOr, chmap};
@@ -147,18 +149,23 @@ impl PCM {
     /// Returns Ok if the error was successfully recovered from, or the original
     /// error if the error was unhandled.
     pub fn try_recover(&self, err: Error, silent: bool) -> Result<()> {
-        if let Some(e) = err.errno() {
-            self.recover(e as c_int, silent)
-        } else { Err(err) }
+        self.recover(err.errno() as c_int, silent)
     }
 
     pub fn wait(&self, timeout_ms: Option<u32>) -> Result<bool> {
         acheck!(snd_pcm_wait(self.0, timeout_ms.map(|x| x as c_int).unwrap_or(-1))).map(|i| i == 1) }
 
-    pub fn state(&self) -> State { State::from_c_int(
-        unsafe { alsa::snd_pcm_state(self.0) } as c_int, "snd_pcm_state").unwrap() }
+    pub fn state(&self) -> State {
+        let rawstate = self.state_raw();
+        if let Ok(state) = State::from_c_int(rawstate, "snd_pcm_state") {
+            state
+        }
+        else {
+            panic!("snd_pcm_state returned an invalid value of {}", rawstate);
+        }
+    }
 
-    /// Only used for debugging the alsa library. Please use the "state" function instead.
+    /// Only used internally, and for debugging the alsa library. Please use the "state" function instead.
     pub fn state_raw(&self) -> c_int { unsafe { alsa::snd_pcm_state(self.0) as c_int } }
 
     pub fn bytes_to_frames(&self, i: isize) -> Frames { unsafe { alsa::snd_pcm_bytes_to_frames(self.0, i as ssize_t) }}
@@ -472,6 +479,120 @@ alsa_enum!(
     DSDU32BE = SND_PCM_FORMAT_DSD_U32_BE,
 );
 
+impl fmt::Display for Format {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        use Format::*;
+        match *self {
+            S8 => write!(f, "S8"),
+            U8 => write!(f, "U8"),
+            S16LE => write!(f, "S16_LE"),
+            S16BE => write!(f, "S16_BE"),
+            U16LE => write!(f, "U16_LE"),
+            U16BE => write!(f, "U16_BE"),
+            S24LE => write!(f, "S24_LE"),
+            S24BE => write!(f, "S24_BE"),
+            U24LE => write!(f, "U24_LE"),
+            U24BE => write!(f, "U24_BE"),
+            S32LE => write!(f, "S32_LE"),
+            S32BE => write!(f, "S32_BE"),
+            U32LE => write!(f, "U32_LE"),
+            U32BE => write!(f, "U32_BE"),
+            FloatLE => write!(f, "FLOAT_LE"),
+            FloatBE => write!(f, "FLOAT_BE"),
+            Float64LE => write!(f, "FLOAT64_LE"),
+            Float64BE => write!(f, "FLOAT64_BE"),
+            IEC958SubframeLE => write!(f, "IEC958_SUBFRAME_LE"),
+            IEC958SubframeBE => write!(f, "IEC958_SUBFRAME_BE"),
+            MuLaw => write!(f, "MU_LAW"),
+            ALaw => write!(f, "A_LAW"),
+            ImaAdPCM => write!(f, "IMA_ADPCM"),
+            MPEG => write!(f, "MPEG"),
+            GSM => write!(f, "GSM"),
+            Special => write!(f, "SPECIAL"),
+            S243LE => write!(f, "S24_3LE"),
+            S243BE => write!(f, "S24_3BE"),
+            U243LE => write!(f, "U24_3LE"),
+            U243BE => write!(f, "U24_3BE"),
+            S203LE => write!(f, "S20_3LE"),
+            S203BE => write!(f, "S20_3BE"),
+            U203LE => write!(f, "U20_3LE"),
+            U203BE => write!(f, "U20_3BE"),
+            S183LE => write!(f, "S18_3LE"),
+            S183BE => write!(f, "S18_3BE"),
+            U183LE => write!(f, "U18_3LE"),
+            U183BE => write!(f, "U18_3BE"),
+            G72324 => write!(f, "G723_24"),
+            G723241B => write!(f, "G723_24_1B"),
+            G72340 => write!(f, "G723_40"),
+            G723401B => write!(f, "G723_40_1B"),
+            DSDU8 => write!(f, "DSD_U8"),
+            DSDU16LE => write!(f, "DSD_U16_LE"),
+            DSDU32LE => write!(f, "DSD_U32_LE"),
+            DSDU16BE => write!(f, "DSD_U16_BE"),
+            DSDU32BE => write!(f, "DSD_U32_BE"),
+            _ => write!(f, "UNKNOWN"),
+        }
+    }
+}
+
+impl FromStr for Format {
+    type Err = Infallible;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        use Format::*;
+        Ok(match s.to_ascii_uppercase().as_str() {
+            "S8" => S8,
+            "U8" => U8,
+            "S16_LE" => S16LE,
+            "S16_BE" => S16BE,
+            "U16_LE" => U16LE,
+            "U16_BE" => U16BE,
+            "S24_LE" => S24LE,
+            "S24_BE" => S24BE,
+            "U24_LE" => U24LE,
+            "U24_BE" => U24BE,
+            "S32_LE" => S32LE,
+            "S32_BE" => S32BE,
+            "U32_LE" => U32LE,
+            "U32_BE" => U32BE,
+            "FLOAT_LE" => FloatLE,
+            "FLOAT_BE" => FloatBE,
+            "FLOAT64_LE" => Float64LE,
+            "FLOAT64_BE" => Float64BE,
+            "IEC958_SUBFRAME_LE" => IEC958SubframeLE,
+            "IEC958_SUBFRAME_BE" => IEC958SubframeBE,
+            "MU_LAW" => MuLaw,
+            "A_LAW" => ALaw,
+            "IMA_ADPCM" => ImaAdPCM,
+            "MPEG" => MPEG,
+            "GSM" => GSM,
+            "SPECIAL" => Special,
+            "S24_3LE" => S243LE,
+            "S24_3BE" => S243BE,
+            "U24_3LE" => U243LE,
+            "U24_3BE" => U243BE,
+            "S20_3LE" => S203LE,
+            "S20_3BE" => S203BE,
+            "U20_3LE" => U203LE,
+            "U20_3BE" => U203BE,
+            "S18_3LE" => S183LE,
+            "S18_3BE" => S183BE,
+            "U18_3LE" => U183LE,
+            "U18_3BE" => U183BE,
+            "G723_24" => G72324,
+            "G723_24_1B" => G723241B,
+            "G723_40" => G72340,
+            "G723_40_1B" => G723401B,
+            "DSD_U8" => DSDU8,
+            "DSD_U16_LE" => DSDU16LE,
+            "DSD_U32_LE" => DSDU32LE,
+            "DSD_U16_BE" => DSDU16BE,
+            "DSD_U32_BE" => DSDU32BE,
+            _ => Unknown,
+        })
+    }
+}
+
 impl Format {
     pub const fn s16() -> Format { <i16 as IoFormat>::FORMAT }
     pub const fn u16() -> Format { <u16 as IoFormat>::FORMAT }
@@ -483,11 +604,51 @@ impl Format {
     #[cfg(target_endian = "little")] pub const fn s24() -> Format { Format::S24LE }
     #[cfg(target_endian = "big")] pub const fn s24() -> Format { Format::S24BE }
 
+    #[cfg(target_endian = "little")] pub const fn s24_3() -> Format { Format::S243LE }
+    #[cfg(target_endian = "big")] pub const fn s24_3() -> Format { Format::S243BE }
+
     #[cfg(target_endian = "little")] pub const fn u24() -> Format { Format::U24LE }
     #[cfg(target_endian = "big")] pub const fn u24() -> Format { Format::U24BE }
 
+    #[cfg(target_endian = "little")] pub const fn u24_3() -> Format { Format::U243LE }
+    #[cfg(target_endian = "big")] pub const fn u24_3() -> Format { Format::U243BE }
+
+    #[cfg(target_endian = "little")] pub const fn s20_3() -> Format { Format::S203LE }
+    #[cfg(target_endian = "big")] pub const fn s20_3() -> Format { Format::S203BE }
+
+    #[cfg(target_endian = "little")] pub const fn u20_3() -> Format { Format::U203LE }
+    #[cfg(target_endian = "big")] pub const fn u20_3() -> Format { Format::U203BE }
+
+    #[cfg(target_endian = "little")] pub const fn s18_3() -> Format { Format::S183LE }
+    #[cfg(target_endian = "big")] pub const fn s18_3() -> Format { Format::S183BE }
+
+    #[cfg(target_endian = "little")] pub const fn u18_3() -> Format { Format::U183LE }
+    #[cfg(target_endian = "big")] pub const fn u18_3() -> Format { Format::U183BE }
+
+    #[cfg(target_endian = "little")] pub const fn dsd_u16() -> Format { Format::DSDU16LE }
+    #[cfg(target_endian = "big")] pub const fn dsd_u16() -> Format { Format::DSDU16BE }
+
+    #[cfg(target_endian = "little")] pub const fn dsd_u32() -> Format { Format::DSDU32LE }
+    #[cfg(target_endian = "big")] pub const fn dsd_u32() -> Format { Format::DSDU32BE }
+
     #[cfg(target_endian = "little")] pub const fn iec958_subframe() -> Format { Format::IEC958SubframeLE }
     #[cfg(target_endian = "big")] pub const fn iec958_subframe() -> Format { Format::IEC958SubframeBE }
+
+    pub fn physical_width(&self) -> Result<i32> {
+        acheck!(snd_pcm_format_physical_width(self.to_c_int()))
+    }
+
+    pub fn width(&self) -> Result<i32> {
+        acheck!(snd_pcm_format_width(self.to_c_int()))
+    }
+
+    pub fn silence_16(&self) -> u16 {
+        unsafe { alsa::snd_pcm_format_silence_16(self.to_c_int()) }
+    }
+
+    pub fn little_endian(&self) -> Result<bool> {
+        acheck!(snd_pcm_format_little_endian(self.to_c_int())).map(|v| v != 0)
+    }
 }
 
 
@@ -747,6 +908,11 @@ impl<'a> HwParams<'a> {
     pub fn get_buffer_size_max(&self) -> Result<Frames> {
         let mut v = 0;
         acheck!(snd_pcm_hw_params_get_buffer_size_max(self.0, &mut v)).map(|_| v as Frames)
+    }
+
+    pub fn get_buffer_time_min(&self) -> Result<u32> {
+        let (mut v, mut d) = (0,0);
+        acheck!(snd_pcm_hw_params_get_buffer_time_min(self.0, &mut v, &mut d)).map(|_| v as u32)
     }
 
     pub fn get_buffer_time_max(&self) -> Result<u32> {
@@ -1058,4 +1224,11 @@ fn print_sizeof() {
     println!("Status size: {}", s);
 
     assert!(s <= STATUS_SIZE);
+}
+
+#[test]
+fn format_display_from_str() {
+    for format in ALL_FORMATS {
+        assert_eq!(format, format.to_string().parse().unwrap());
+    }
 }

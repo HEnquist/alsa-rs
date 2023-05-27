@@ -13,6 +13,9 @@
 //!
 //! Enjoy!
 
+#![allow(clippy::all)]
+#![warn(clippy::correctness, clippy::suspicious, clippy::perf)]
+
 extern crate alsa_sys as alsa;
 extern crate libc;
 #[macro_use]
@@ -42,6 +45,11 @@ impl $name {
     fn from_c_int(c: ::libc::c_int, s: &'static str) -> Result<$name> {
         Self::all().iter().find(|&&x| c == x as ::libc::c_int).map(|&x| x)
             .ok_or_else(|| Error::unsupported(s))
+    }
+
+    #[allow(dead_code)]
+    fn to_c_int(&self) -> ::libc::c_int {
+        return *self as ::libc::c_int;
     }
 }
 
@@ -127,6 +135,10 @@ mod chmap;
 pub mod direct;
 
 /// Re-exports from the nix crate.
+///
+/// Use these re-exports instead of also depending on the nix crate. There
+/// is no guarantee that these will match a specific nix version, it may
+/// change between minor updates of the library.
 pub mod nix {
     pub use nix_the_crate::Error;
     pub use nix_the_crate::errno;
